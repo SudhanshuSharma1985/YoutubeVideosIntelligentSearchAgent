@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import json
 from datetime import datetime, timedelta
 import pandas as pd
 import time
@@ -290,6 +291,14 @@ def main():
             type="password",
             help="Enter your Google Cloud YouTube Data API v3 key"
         )
+        # Optional OpenAI settings to auto-generate a concise search query from the description
+        st.markdown("---")
+        st.subheader("🤖 (Optional) GPT Assist")
+        openai_api_key = st.text_input(
+            "🔐 OpenAI API Key (optional)",
+            type="password",
+            help="If provided, the app will call the OpenAI Chat Completions API to summarize the description and suggest a short search query."
+        )
         
         if api_key:
             st.success("✅ API Key loaded")
@@ -300,20 +309,42 @@ def main():
         st.subheader("🔍 Search Parameters")
         
         search_query = st.text_input(
-            "Search Topic",
+            "What you want to learn , Tell us ?",
             value="langchain tutorial",
             placeholder="e.g., autogen, AI agents, python"
         )
+
+        # Optional multi-line description / notes about the search
+        search_description = st.text_area(
+            "Search Description (optional)",
+            value="",
+            placeholder="Describe the kind of content, tone, or specifics you're looking for...",
+            help="This description will be saved with the search and shown with the analysis.",
+            height=120
+        )
         
+
         max_results = st.slider(
             "Number of Videos",
-            min_value=10,
-            max_value=100,
-            value=50,
-            step=10,
+            min_value=5,
+            max_value=15,
+            value=5,
+            step=1,
             help="More videos = more API quota used"
         )
         
+        openai_model = st.selectbox(
+            "GPT Model",
+            ["gpt-3.5-turbo", "gpt-4o-mini"],
+            index=0,
+            help="Model used to generate the search query"
+        )
+
+        use_gpt_generate = st.checkbox(
+            "Auto-generate search query from description",
+            value=True,
+            help="If checked and an OpenAI key + description are provided, GPT will generate a concise search query to use."
+        )
         search_order = st.selectbox(
             "Initial Search Order",
             ["relevance", "viewCount", "date", "rating"],
@@ -422,8 +453,129 @@ def main():
         if search_button:
             with st.spinner(f"🔍 Analyzing videos for '{search_query}'..."):
                 agent = YouTubeAgent(api_key)
-                
-                # Search for videos
+
+                # Persist the optional description so it survives reruns
+                st.session_state['search_description'] = search_description
+
+                # If OpenAI key, description, and toggle are provided, ask GPT to generate a concise search query
+                generated_query = None
+                generated_summary = None
+                if openai_api_key and search_description and use_gpt_generate:
+                    try:
+                        st.info("✨ Generating search query with GPT...")
+                        prompt_system = (
+                            "You are a helpful assistant that converts a user's free-form description into a concise YouTube search query and a one-sentence summary. "
+                            "Return ONLY a JSON object with keys: \"query\" and \"summary\". The \"query\" should be 3-6 words suitable for YouTube search.\n"
+                        )
+
+                        messages = [
+                            {"role": "system", "content": prompt_system},
+                            {"role": "user", "content": f"Description:\n{search_description}"}
+                        ]
+
+                        payload = {
+                            "model": openai_model,
+                            "messages": messages,
+                            "temperature": 0.2,
+                            "max_tokens": 200
+                        }
+
+                        headers = {
+                            "Authorization": f"Bearer {openai_api_key}",
+                            "Content-Type": "application/json"
+                        }
+
+                        resp = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=15)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        text = data.get('choices', [])[0].get('message', {}).get('content', '')
+
+                        # Try to parse JSON from the model output
+                        parsed = None
+                        try:
+                            parsed = json.loads(text)
+                        except Exception:
+                            # Attempt to extract JSON-like substring
+                            import re
+                            m = re.search(r"\{[\s\S]*\}", text)
+                            if m:
+                                try:
+                                    parsed = json.loads(m.group(0))
+                                except Exception:
+                                    parsed = None
+
+                        if parsed:
+                            generated_query = parsed.get('query') or parsed.get('search_query')
+                            generated_summary = parsed.get('summary')
+                        else:
+                            # Fallback: take the first non-empty line as query
+                            lines = [l.strip() for l in text.splitlines() if l.strip()]
+                            if lines:
+                                generated_query = lines[0]
+                                generated_summary = ' '.join(lines[1:])[:300]
+
+                        # If we have a generated summary, ask GPT to refine it into a search-optimized query
+                        optimized_query = None
+                        if generated_summary:
+                            try:
+                                st.info("🔧 Refining query from GPT summary...")
+                                prompt_refine = (
+                                    "You are an assistant that converts a one-sentence summary into a compact, search-optimized YouTube query of 3-6 words. "
+                                    "Return ONLY the search query text (no JSON, no extra commentary)."
+                                )
+
+                                messages_refine = [
+                                    {"role": "system", "content": prompt_refine},
+                                    {"role": "user", "content": f"Summary:\n{generated_summary}"}
+                                ]
+
+                                payload_refine = {
+                                    "model": openai_model,
+                                    "messages": messages_refine,
+                                    "temperature": 0.1,
+                                    "max_tokens": 40
+                                }
+
+                                resp2 = requests.post("https://api.openai.com/v1/chat/completions", headers={
+                                    "Authorization": f"Bearer {openai_api_key}",
+                                    "Content-Type": "application/json"
+                                }, json=payload_refine, timeout=12)
+                                resp2.raise_for_status()
+                                data2 = resp2.json()
+                                text2 = data2.get('choices', [])[0].get('message', {}).get('content', '')
+
+                                # Prefer plain-text first line as optimized query
+                                lines2 = [l.strip() for l in text2.splitlines() if l.strip()]
+                                if lines2:
+                                    optimized_query = lines2[0]
+                                else:
+                                    optimized_query = text2.strip()
+
+                            except Exception as e:
+                                # If refine fails, fall back gracefully to the original generated_query
+                                optimized_query = None
+
+                        # Finalize which query to use: prefer optimized_query, else generated_query, else original sidebar search_query
+                        final_generated_query = optimized_query or generated_query or None
+
+                        if final_generated_query:
+                            # Use the generated/optimized query for the search and persist
+                            search_query = final_generated_query
+                            st.session_state['search_query'] = search_query
+                            st.session_state['generated_query'] = generated_query or ''
+                            st.session_state['generated_summary'] = generated_summary or ''
+                            st.session_state['optimized_query'] = optimized_query or ''
+                            if optimized_query:
+                                st.success(f"GPT optimized query: {optimized_query}")
+                            else:
+                                st.success(f"GPT suggested query: {generated_query}")
+
+                    except requests.exceptions.RequestException as e:
+                        st.warning(f"GPT generation failed: {str(e)}")
+                    except Exception as e:
+                        st.warning(f"GPT generation error: {str(e)}")
+
+                # Search for videos (using possibly generated `search_query`)
                 video_ids = agent.search_videos(search_query, max_results, search_order)
                 
                 if not video_ids:
@@ -448,6 +600,22 @@ def main():
         
         videos_data = st.session_state.videos_data
         search_query = st.session_state.search_query
+        # Retrieve persisted search description (if any)
+        search_description = st.session_state.get('search_description', '')
+
+        # Retrieve GPT-generated query/summary if available
+        generated_query = st.session_state.get('generated_query', '')
+        generated_summary = st.session_state.get('generated_summary', '')
+        optimized_query = st.session_state.get('optimized_query', '')
+
+        if search_description:
+            st.info(f"📝 Search Description: {search_description}")
+        if generated_query:
+            st.success(f"🤖 GPT Generated Query: {generated_query}")
+        if optimized_query:
+            st.success(f"🔧 GPT Optimized Query: {optimized_query}")
+        if generated_summary:
+            st.info(f"🗒️ GPT Summary: {generated_summary}")
         
         # Apply filters
         filtered_videos = videos_data.copy()
