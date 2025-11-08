@@ -194,6 +194,178 @@ class YouTubeAgent:
         # Cap at 100
         return min(relevance_score, 100)
     
+    def classify_difficulty_level(self, video):
+        """
+        Classify video difficulty level: Beginner, Intermediate, or Advanced
+        Returns dict with level, score (0-100), confidence, and signals
+        """
+        score = 0
+        signals = []
+        
+        title = video['title'].lower()
+        description = video['description'].lower()
+        tags = ' '.join(video.get('tags', [])).lower()
+        duration_seconds = video.get('duration_seconds', 0)
+        
+        # 1. EXPLICIT KEYWORDS (40 points possible)
+        beginner_keywords = [
+            'beginner', 'introduction', 'intro to', 'basics', 'getting started',
+            'tutorial', '101', 'fundamentals', 'first', 'start', 'learn',
+            'explained', 'crash course', 'what is', 'how to start',
+            'for beginners', 'complete guide', 'step by step', 'from scratch'
+        ]
+        
+        intermediate_keywords = [
+            'intermediate', 'building', 'practical', 'project',
+            'guide', 'implementing', 'working with', 'hands-on',
+            'deep dive', 'real-world', 'workshop'
+        ]
+        
+        advanced_keywords = [
+            'advanced', 'expert', 'optimization', 'architecture',
+            'internals', 'performance', 'scalability', 'production',
+            'mastering', 'under the hood', 'system design', 'best practices',
+            'enterprise', 'at scale', 'professional'
+        ]
+        
+        # Check title (highest weight - 20 points)
+        title_beginner = sum(1 for kw in beginner_keywords if kw in title)
+        title_intermediate = sum(1 for kw in intermediate_keywords if kw in title)
+        title_advanced = sum(1 for kw in advanced_keywords if kw in title)
+        
+        if title_beginner > 0:
+            score -= 20
+            signals.append(f"Beginner keywords in title ({title_beginner})")
+        if title_intermediate > 0:
+            score += 0
+            signals.append(f"Intermediate keywords in title ({title_intermediate})")
+        if title_advanced > 0:
+            score += 20
+            signals.append(f"Advanced keywords in title ({title_advanced})")
+        
+        # Check description (10 points)
+        desc_beginner = sum(1 for kw in beginner_keywords if kw in description)
+        desc_advanced = sum(1 for kw in advanced_keywords if kw in description)
+        
+        if desc_beginner > 2:
+            score -= 10
+            signals.append("Multiple beginner keywords in description")
+        elif desc_advanced > 2:
+            score += 10
+            signals.append("Multiple advanced keywords in description")
+        
+        # Check tags (5 points)
+        if any(kw in tags for kw in beginner_keywords):
+            score -= 5
+            signals.append("Beginner tags present")
+        elif any(kw in tags for kw in advanced_keywords):
+            score += 5
+            signals.append("Advanced tags present")
+        
+        # 2. DURATION PATTERN (15 points possible)
+        if duration_seconds > 0:
+            if duration_seconds < 600:  # Less than 10 min
+                score -= 10
+                signals.append("Short duration (quick intro/overview)")
+            elif duration_seconds < 1800:  # 10-30 min
+                score += 0
+                signals.append("Medium duration (tutorial)")
+            elif duration_seconds < 3600:  # 30-60 min
+                score += 8
+                signals.append("Long duration (detailed/in-depth)")
+            else:  # 60+ min
+                score += 12
+                signals.append("Very long (comprehensive/masterclass)")
+        
+        # 3. TECHNICAL DENSITY (15 points possible)
+        technical_terms = [
+            'api', 'framework', 'algorithm', 'optimization', 'async',
+            'architecture', 'pattern', 'dependency', 'configuration',
+            'deployment', 'testing', 'ci/cd', 'kubernetes', 'docker',
+            'microservices', 'database', 'query', 'cache', 'authentication'
+        ]
+        
+        tech_count = sum(1 for term in technical_terms 
+                        if term in description or term in title or term in tags)
+        
+        if tech_count == 0:
+            score -= 10
+            signals.append("Low technical density")
+        elif tech_count <= 3:
+            score += 0
+            signals.append(f"Moderate technical density ({tech_count} terms)")
+        else:
+            score += 10
+            signals.append(f"High technical density ({tech_count} terms)")
+        
+        # 4. PREREQUISITE INDICATORS (15 points possible)
+        prerequisite_phrases = [
+            'should know', 'familiarity with', 'assumes you know',
+            'prior knowledge', 'experience with', 'already know',
+            'prerequisite', 'requires understanding'
+        ]
+        
+        no_prerequisite_phrases = [
+            'no experience', 'no prior knowledge', 'complete beginner',
+            'never coded', 'from scratch', 'zero to hero', 'no prerequisites'
+        ]
+        
+        has_prerequisites = any(phrase in description for phrase in prerequisite_phrases)
+        no_prerequisites = any(phrase in description for phrase in no_prerequisite_phrases)
+        
+        if no_prerequisites:
+            score -= 15
+            signals.append("Explicitly states no prerequisites needed")
+        elif has_prerequisites:
+            score += 15
+            signals.append("Prerequisites mentioned")
+        
+        # 5. CONTENT TYPE INDICATORS (10 points possible)
+        project_words = ['project', 'build', 'create', 'make', 'develop']
+        theory_words = ['theory', 'concept', 'understanding', 'explain', 'why']
+        
+        if any(word in title.lower() for word in project_words):
+            score += 5
+            signals.append("Project-based (typically intermediate+)")
+        
+        if sum(1 for word in theory_words if word in title.lower()) >= 2:
+            score -= 5
+            signals.append("Theory-focused (often beginner-friendly)")
+        
+        # 6. ENGAGEMENT QUALITY (5 points bonus)
+        engagement = video.get('engagement_score', 0)
+        if engagement > 5:
+            # High engagement on what appears to be beginner content
+            if score < -10:
+                score -= 5
+                signals.append("High engagement (well-explained beginner content)")
+        
+        # Normalize score to 0-100 range
+        # Current range is roughly -65 to +85, center at 0
+        normalized_score = max(0, min(100, ((score + 65) / 150) * 100))
+        
+        # Classify based on normalized score
+        if normalized_score < 33:
+            level = 'Beginner'
+            emoji = '🟢'
+            confidence = "High" if normalized_score < 20 else "Medium"
+        elif normalized_score < 67:
+            level = 'Intermediate'
+            emoji = '🟡'
+            confidence = "Medium"
+        else:
+            level = 'Advanced'
+            emoji = '🔴'
+            confidence = "High" if normalized_score > 80 else "Medium"
+        
+        return {
+            'level': level,
+            'emoji': emoji,
+            'score': round(normalized_score, 1),
+            'confidence': confidence,
+            'signals': signals
+        }
+    
     def calculate_metrics(self, videos, search_query=""):
         """Calculate additional engagement and popularity metrics"""
         for video in videos:
@@ -217,6 +389,14 @@ class YouTubeAgent:
             
             # Calculate topic relevance
             video['topic_relevance'] = self.calculate_topic_relevance(video, search_query)
+            
+            # Classify difficulty level
+            difficulty_data = self.classify_difficulty_level(video)
+            video['difficulty_level'] = difficulty_data['level']
+            video['difficulty_emoji'] = difficulty_data['emoji']
+            video['difficulty_score'] = difficulty_data['score']
+            video['difficulty_confidence'] = difficulty_data['confidence']
+            video['difficulty_signals'] = difficulty_data['signals']
             
             # Calculate popularity score (weighted combination)
             # Normalize views (log scale to handle huge variance)
@@ -278,7 +458,7 @@ def format_date(date_str):
 
 def main():
     st.title("🤖 YouTube Video Intelligence Agent")
-    st.markdown("AI-powered video discovery with smart relevance & popularity analysis")
+    st.markdown("AI-powered video discovery with smart relevance & difficulty analysis")
     
     # Sidebar configuration
     with st.sidebar:
@@ -332,6 +512,7 @@ def main():
                 "Popularity Score",
                 "Views",
                 "Engagement Score",
+                "Difficulty Level",
                 "Likes",
                 "Like Ratio %",
                 "Comments",
@@ -339,6 +520,18 @@ def main():
                 "Duration"
             ]
         )
+        
+        # Difficulty filter - PROMINENTLY DISPLAYED
+        st.markdown("### 🎓 Filter by Difficulty Level")
+        difficulty_filter = st.multiselect(
+            "Select Difficulty Levels to Show",
+            options=["Beginner", "Intermediate", "Advanced"],
+            default=["Beginner", "Intermediate", "Advanced"],
+            help="Filter videos by their difficulty classification"
+        )
+        
+        st.markdown("---")
+        st.subheader("🔧 Additional Filters")
         
         # Filters
         min_views = st.number_input(
@@ -398,8 +591,9 @@ def main():
             st.markdown("""
             ### 🎯 Features
             - **Smart Relevance Scoring** - AI-powered video ranking
+            - **Difficulty Classification** - Auto-detect Beginner/Intermediate/Advanced
             - **Popularity Analysis** - Multi-factor engagement metrics
-            - **Advanced Filtering** - Views, duration, age filters
+            - **Advanced Filtering** - Views, duration, age, difficulty filters
             - **Detailed Metadata** - Views, likes, comments, ratios
             - **Export to CSV** - Download all analysis data
             """)
@@ -408,11 +602,11 @@ def main():
             st.markdown("""
             ### 📊 Metrics Calculated
             - **Relevance Score** - 50% Views + 30% Topic Match + 20% Engagement
+            - **Difficulty Level** - Multi-factor AI classification
             - **Topic Relevance** - Keyword match in title, tags, description
             - **Popularity Score** - Weighted views + engagement
             - **Engagement Score** - Likes + comments / views
             - **Like Ratio** - Percentage of viewers who liked
-            - **Comment Ratio** - Viewer interaction rate
             """)
         
         return
@@ -452,6 +646,10 @@ def main():
         # Apply filters
         filtered_videos = videos_data.copy()
         
+        # Difficulty filter
+        if difficulty_filter:
+            filtered_videos = [v for v in filtered_videos if v['difficulty_level'] in difficulty_filter]
+        
         if min_views > 0:
             filtered_videos = [v for v in filtered_videos if v['views'] >= min_views]
         
@@ -467,6 +665,7 @@ def main():
             "Popularity Score": "popularity_score",
             "Views": "views",
             "Engagement Score": "engagement_score",
+            "Difficulty Level": "difficulty_score",
             "Likes": "likes",
             "Like Ratio %": "like_ratio",
             "Comments": "comments",
@@ -498,6 +697,19 @@ def main():
         col4.metric("🎯 Avg Engagement", f"{avg_engagement:.1f}%")
         col5.metric("⭐ Avg Relevance", f"{avg_relevance:.0f}")
         
+        # Difficulty distribution
+        st.markdown("---")
+        st.subheader("📚 Difficulty Distribution")
+        diff_col1, diff_col2, diff_col3 = st.columns(3)
+        
+        beginner_count = len([v for v in sorted_videos if v['difficulty_level'] == 'Beginner'])
+        intermediate_count = len([v for v in sorted_videos if v['difficulty_level'] == 'Intermediate'])
+        advanced_count = len([v for v in sorted_videos if v['difficulty_level'] == 'Advanced'])
+        
+        diff_col1.metric("🟢 Beginner", beginner_count)
+        diff_col2.metric("🟡 Intermediate", intermediate_count)
+        diff_col3.metric("🔴 Advanced", advanced_count)
+        
         st.markdown("---")
         
         # Display videos
@@ -510,14 +722,23 @@ def main():
                 with col1:
                     st.image(video['thumbnail'], use_container_width=True)
                     
-                    # Score badges
-                    badge_col1, badge_col2 = st.columns(2)
+                    # Score badges - added difficulty here too
+                    badge_col1, badge_col2, badge_col3 = st.columns(3)
                     badge_col1.metric("⭐ Relevance", f"{video['relevance_score']:.0f}")
                     badge_col2.metric("🔥 Popularity", f"{video['popularity_score']:.0f}")
+                    badge_col3.metric(f"{video.get('difficulty_emoji', '🟢')}", video.get('difficulty_level', 'N/A'))
                 
                 with col2:
-                    # Title and channel
+                    # Title
                     st.markdown(f"### {idx}. {video['title']}")
+                    
+                    # Difficulty badge prominently displayed
+                    difficulty_emoji = video.get('difficulty_emoji', '🟢')
+                    difficulty_level = video.get('difficulty_level', 'Unknown')
+                    difficulty_conf = video.get('difficulty_confidence', 'Low')
+                    st.markdown(f"### {difficulty_emoji} **{difficulty_level}** ({difficulty_conf} confidence)")
+                    
+                    # Channel and date info
                     st.markdown(f"**📺 {video['channel']}** • {format_date(video['published_at'])} ({video['days_old']} days ago)")
                     
                     # Relevance breakdown
@@ -534,11 +755,18 @@ def main():
                     # Duration
                     st.caption(f"⏱️ Duration: {video['duration_formatted']}")
                     
-                    # Description
-                    with st.expander("📝 Description"):
+                    # Description and difficulty signals
+                    with st.expander("📝 Details & Classification"):
+                        st.write("**Description:**")
                         st.write(video['description'])
-                        if video['tags']:
+                        if video.get('tags'):
                             st.write(f"**Tags:** {', '.join(video['tags'][:10])}")
+                        
+                        st.write(f"\n**🎓 Difficulty Classification Signals:**")
+                        st.write(f"Difficulty Score: {video.get('difficulty_score', 0):.1f}/100")
+                        if video.get('difficulty_signals'):
+                            for signal in video['difficulty_signals']:
+                                st.write(f"• {signal}")
                     
                     # Watch link
                     st.markdown(f"[🔗 Watch on YouTube](https://www.youtube.com/watch?v={video['video_id']})")
@@ -555,6 +783,8 @@ def main():
                 'Rank': sorted_videos.index(video) + 1,
                 'Title': video['title'],
                 'Channel': video['channel'],
+                'Difficulty_Level': video['difficulty_level'],
+                'Difficulty_Confidence': video['difficulty_confidence'],
                 'URL': f"https://www.youtube.com/watch?v={video['video_id']}",
                 'Views': video['views'],
                 'Likes': video['likes'],
